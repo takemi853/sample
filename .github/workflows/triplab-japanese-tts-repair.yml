@@ -1,0 +1,64 @@
+name: triplab-japanese-tts-repair
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/triplab-japanese-tts-repair.yml
+
+jobs:
+  synthesize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install TTS dependency
+        run: python -m pip install --disable-pip-version-check gTTS==2.5.4
+      - name: Generate Japanese narration segments
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/raw output/wav
+          cat > /tmp/generate.py <<'PY'
+          from gtts import gTTS
+          from pathlib import Path
+
+          segments = [
+              "乗り継ぎに遅れた。次の航空券は、買い直しになるのでしょうか。",
+              "結論は、同じ予約で通し発券されているかで変わります。",
+              "前の便が遅れて、同じ予約の乗り継ぎに間に合わなかった場合。航空会社が、次の空席便へ振り替えるのが一般的です。",
+              "空港では、まず乗り継ぎカウンターへ向かいましょう。",
+              "一方、別々に買った航空券は、保護されないことが多く、買い直しになる可能性があります。",
+              "確認するのは、便名よりも、同じ予約の通し発券かどうかです。",
+          ]
+          out = Path("output/raw")
+          for i, text in enumerate(segments, 1):
+              gTTS(text=text, lang="ja", slow=False).save(str(out / f"segment_{i:02d}.mp3"))
+          (Path("output") / "script.txt").write_text("\n".join(segments), encoding="utf-8")
+          PY
+          python /tmp/generate.py
+          for f in output/raw/*.mp3; do
+            base="$(basename "$f" .mp3)"
+            ffmpeg -hide_banner -loglevel error -y -i "$f" \
+              -af "atempo=1.08,aresample=48000,dynaudnorm=f=150:g=7" \
+              -ar 48000 -ac 1 "output/wav/${base}.wav"
+          done
+          ffmpeg -hide_banner -loglevel error -y -f lavfi -i anullsrc=r=48000:cl=mono -t 0.20 output/wav/pause.wav
+          : > output/concat.txt
+          for i in $(seq -w 1 6); do
+            echo "file '$(pwd)/output/wav/segment_${i}.wav'" >> output/concat.txt
+            if [ "$i" != "06" ]; then
+              echo "file '$(pwd)/output/wav/pause.wav'" >> output/concat.txt
+            fi
+          done
+          ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i output/concat.txt -c:a pcm_s16le -ar 48000 -ac 1 output/narration_ja_v2.wav
+          ffprobe -v error -show_entries format=duration -of default=nw=1 output/narration_ja_v2.wav > output/probe.txt
+      - name: Upload narration artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: triplab-japanese-narration-v2
+          path: output/
+          if-no-files-found: error
+          retention-days: 7
